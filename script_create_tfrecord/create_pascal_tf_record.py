@@ -104,7 +104,7 @@ def dict_to_tf_example(data,
     difficult_obj = []
     if 'object' in data:
         for obj in data['object']:
-            difficult = bool(int(obj['difficult']))
+            difficult = False  # bool(int(obj['difficult']))
             if ignore_difficult_instances and difficult:
                 continue
 
@@ -116,7 +116,8 @@ def dict_to_tf_example(data,
             ymax.append(float(obj['bndbox']['ymax']) / height)
             classes_text.append(obj['name'].encode('utf8'))
             classes.append(label_map_dict[obj['name']])
-            truncated.append(int(obj['truncated']))
+            # truncated.append(int(obj['truncated']))
+            truncated.append(0)
             poses.append(obj['pose'].encode('utf8'))
 
     example = tf.train.Example(features=tf.train.Features(feature={
@@ -142,14 +143,85 @@ def dict_to_tf_example(data,
     return example
 
 
+def background_tf_example(
+        image_path,
+):
+    """Convert XML derived dict to tf.Example proto.
+
+    Notice that this function normalizes the bounding box coordinates provided
+    by the raw data.
+
+    Args:
+      data: dict holding PASCAL XML fields for a single image (obtained by
+        running dataset_util.recursive_parse_xml_to_dict)
+      image_path: Full path to image file
+      label_map_dict: A map from string label names to integers ids.
+      ignore_difficult_instances: Whether to skip difficult instances in the
+        dataset  (default: False).
+      image_subdirectory: String specifying subdirectory within the
+        PASCAL dataset directory holding the actual image data.
+
+    Returns:
+      example: The converted tf.Example.
+
+    Raises:
+      ValueError: if the image pointed to by data['filename'] is not a valid JPEG
+    """
+
+    full_path = image_path
+    with tf.gfile.GFile(full_path, 'rb') as fid:
+        encoded_jpg = fid.read()
+    encoded_jpg_io = io.BytesIO(encoded_jpg)
+    image = PIL.Image.open(encoded_jpg_io)
+    if image.format != 'JPEG':
+        raise ValueError('Image format not JPEG')
+    key = hashlib.sha256(encoded_jpg).hexdigest()
+
+    filename = full_path.split('/')[-1]
+    width = image.width
+    height = image.height
+
+    xmin = []
+    ymin = []
+    xmax = []
+    ymax = []
+    classes = []
+    classes_text = []
+    truncated = []
+    poses = []
+    difficult_obj = []
+
+    example = tf.train.Example(features=tf.train.Features(feature={
+        'image/height': dataset_util.int64_feature(height),
+        'image/width': dataset_util.int64_feature(width),
+        'image/filename': dataset_util.bytes_feature(
+            filename.encode('utf8')),
+        'image/source_id': dataset_util.bytes_feature(
+            filename.encode('utf8')),
+        'image/key/sha256': dataset_util.bytes_feature(key.encode('utf8')),
+        'image/encoded': dataset_util.bytes_feature(encoded_jpg),
+        'image/format': dataset_util.bytes_feature('jpeg'.encode('utf8')),
+        'image/object/bbox/xmin': dataset_util.float_list_feature(xmin),
+        'image/object/bbox/xmax': dataset_util.float_list_feature(xmax),
+        'image/object/bbox/ymin': dataset_util.float_list_feature(ymin),
+        'image/object/bbox/ymax': dataset_util.float_list_feature(ymax),
+        'image/object/class/text': dataset_util.bytes_list_feature(classes_text),
+        'image/object/class/label': dataset_util.int64_list_feature(classes),
+        'image/object/difficult': dataset_util.int64_list_feature(difficult_obj),
+        'image/object/truncated': dataset_util.int64_list_feature(truncated),
+        'image/object/view': dataset_util.bytes_list_feature(poses),
+    }))
+    return example
+
+
 def main(_):
     data_dir = FLAGS.data_dir
 
     writer = tf.python_io.TFRecordWriter(FLAGS.output_path)
 
     label_map_dict = {
-        # "person": 1,
-        "face": 1
+        "person": 1,
+        "face": 2
     }
 
     # load list image files and xml files
@@ -159,31 +231,40 @@ def main(_):
 
     images_path = glob.glob(os.path.join(images_dir, '*.jpg'))
 
-    xmls_dir = os.path.join(data_dir, FLAGS.annotations_dir)
-    xmls_path = glob.glob(os.path.join(xmls_dir, '*.xml'))
-    print(data_dir)
-    print(xmls_dir)
+    # xmls_dir = os.path.join(data_dir, FLAGS.annotations_dir)
+    # xmls_path = glob.glob(os.path.join(xmls_dir, '*.xml'))
+    # print(data_dir)
+    # print(xmls_dir)
 
-    print(len(images_path))
-    print(len(xmls_path))
-    assert len(images_path) == len(xmls_path)
+    # print(len(images_path))
+    # print(len(xmls_path))
+    # assert len(images_path) == len(xmls_path)
 
     for idx in range(len(images_path)):
         if idx % 100 == 0:
             logging.info('On image %d of %d', idx, len(images_path))
-        xml_path = xmls_path[idx]
-        with tf.gfile.GFile(xml_path, 'r') as fid:
-            xml_str = fid.read()
-        xml = etree.fromstring(xml_str)
-        data = dataset_util.recursive_parse_xml_to_dict(xml)['annotation']
-
+        # xml_path = xmls_path[idx]
         image_path = images_path[idx]
-        tf_example = dict_to_tf_example(data, image_path, label_map_dict,
-                                        FLAGS.ignore_difficult_instances)
-        writer.write(tf_example.SerializeToString())
+        xml_path = image_path.replace(
+            '/{}/'.format(FLAGS.images_dir), '/{}/'.format(FLAGS.annotations_dir))
+        xml_path = xml_path.replace('.jpg', '.xml')
+
+        if os._exists(xml_path):
+            with tf.gfile.GFile(xml_path, 'r') as fid:
+                xml_str = fid.read()
+            xml = etree.fromstring(xml_str)
+            data = dataset_util.recursive_parse_xml_to_dict(xml)['annotation']
+
+            tf_example = dict_to_tf_example(data, image_path, label_map_dict,
+                                            FLAGS.ignore_difficult_instances)
+            writer.write(tf_example.SerializeToString())
+        else:
+            tf_example = background_tf_example(image_path)
+            writer.write(tf_example.SerializeToString())
 
     writer.close()
 
 
 if __name__ == '__main__':
+    logging.basicConfig(format='%(levelname)s:%(message)s', level=logging.INFO)
     tf.app.run()
