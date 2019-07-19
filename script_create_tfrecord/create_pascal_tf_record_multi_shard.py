@@ -18,7 +18,7 @@ r"""Convert raw PASCAL dataset to TFRecord for object_detection.
 Example usage:
     python object_detection/dataset_tools/create_pascal_tf_record.py \
         --data_dir=/home/user/VOCdevkit \
-        --output_dir=/home/user
+        --output_path=/home/user/pascal.record
 """
 from __future__ import absolute_import
 from __future__ import division
@@ -34,22 +34,23 @@ import PIL.Image
 import tensorflow as tf
 import glob
 import random
+from multiprocessing import Process
 
 import dataset_util
-
-import xml.etree.ElementTree as ET
 
 
 flags = tf.app.flags
 flags.DEFINE_string(
     'data_dir', '', 'Root directory to raw PASCAL VOC dataset.')
+flags.DEFINE_string('set', 'train', 'Convert training set, validation set or '
+                    'merged set.')
 flags.DEFINE_string('images_dir', 'images',
                     'Name of images directory.')
 flags.DEFINE_string('annotations_dir', 'xml',
                     'Name of annotations directory.')
 flags.DEFINE_string('output_dir', '', 'Path to output TFRecord')
-# flags.DEFINE_integer(
-#     'ratio', '7', 'Ratio to split data to train set and val set. Default is train 7/ val 3')
+flags.DEFINE_integer(
+    'shard_num', '4', 'Number of shards')
 flags.DEFINE_boolean('ignore_difficult_instances', False, 'Whether to ignore '
                      'difficult instances')
 FLAGS = flags.FLAGS
@@ -111,8 +112,6 @@ def dict_to_tf_example(data,
         for obj in data['object']:
             difficult = False  # bool(int(obj['difficult']))
             if ignore_difficult_instances and difficult:
-                continue
-            if obj['name'] not in label_map_dict:
                 continue
 
             difficult_obj.append(int(difficult))
@@ -209,10 +208,6 @@ def background_tf_example(
 
 def create_tf_record(images_path, output_path, images_dir_name='images', annotation_dir_name='xml'):
 
-    # label_map_dict = {
-    #     "person": 1,
-    #     "face": 2
-    # }
     label_map_dict = {'person': 1, 'face': 2, 'potted plant': 3, 'tvmonitor': 4, 'chair': 5, 'microwave': 6, 'refrigerator': 7, 'book': 8, 'clock': 9, 'vase': 10, 'dining table': 11, 'bear': 12, 'bed': 13, 'stop sign': 14, 'truck': 15, 'car': 16, 'teddy bear': 17, 'skis': 18, 'oven': 19, 'sports ball': 20, 'baseball glove': 21, 'tennis racket': 22, 'handbag': 23, 'backpack': 24, 'bird': 25, 'boat': 26, 'cell phone': 27, 'train': 28, 'sandwich': 29, 'bowl': 30, 'surfboard': 31, 'laptop': 32, 'mouse': 33, 'keyboard': 34, 'bus': 35, 'cat': 36, 'airplane': 37, 'zebra': 38, 'tie': 39, 'traffic light': 40, 'apple': 41, 'baseball bat': 42, 'knife': 43, 'cake': 44, 'wine glass': 45, 'cup': 46, 'spoon': 47, 'banana': 48, 'donut': 49, 'sink': 50, 'toilet': 51, 'broccoli': 52, 'skateboard': 53, 'fork': 54, 'carrot': 55, 'couch': 56, 'remote': 57, 'scissors': 58, 'bicycle': 59, 'sheep': 60, 'bench': 61, 'bottle': 62, 'orange': 63, 'elephant': 64, 'motorcycle': 65, 'horse': 66, 'hot dog': 67, 'frisbee': 68, 'umbrella': 69, 'dog': 70, 'kite': 71, 'pizza': 72, 'fire hydrant': 73, 'suitcase': 74, 'cow': 75, 'giraffe': 76, 'snowboard': 77, 'parking meter': 78, 'toothbrush': 79, 'toaster': 80, 'hair drier': 81, 'pottedplant': 82, 'sofa': 83, 'diningtable': 84, 'motorbike': 85, 'aeroplane': 86}
 
     logging.info('Creating {}'.format(output_path))
@@ -221,6 +216,7 @@ def create_tf_record(images_path, output_path, images_dir_name='images', annotat
 
     for idx in range(len(images_path)):
         if idx % 100 == 0:
+            logging.info('process id: %d', os.getpid())
             logging.info('On image %d of %d', idx, len(images_path))
         # xml_path = xmls_path[idx]
         image_path = images_path[idx]
@@ -228,10 +224,10 @@ def create_tf_record(images_path, output_path, images_dir_name='images', annotat
             '/{}/'.format(images_dir_name), '/{}/'.format(annotation_dir_name))
         xml_path = xml_path.replace('.jpg', '.xml')
 
-        if os.path.exists(xml_path):            
-            # print(xml_path)            
-            tree = ET.parse(xml_path)
-            xml = tree.getroot()
+        if os.path.exists(xml_path):
+            with tf.gfile.GFile(xml_path, 'r') as fid:
+                xml_str = fid.read()
+            xml = etree.fromstring(xml_str)
             data = dataset_util.recursive_parse_xml_to_dict(xml)['annotation']
 
             tf_example = dict_to_tf_example(data, image_path, label_map_dict)
@@ -256,18 +252,37 @@ def main(_):
     random.seed(42)
     random.shuffle(images_path)
 
-    # set_name = data_dir.split(os.sep)[-1]
-    if str(data_dir).endswith(os.sep):
-        set_name = os.path.split(data_dir)[-2]
-    else:
-        set_name = os.path.split(data_dir)[-1]
+    shards = FLAGS.shard_num
+    set_name = FLAGS.set
 
-    print("dataset contain: {} images".format(len(images_path)))
+    num_in_shard = len(images_path) // shards
 
-    tfrecord_path = os.path.join(FLAGS.output_dir, '{}.record'.format(set_name))
-    print('saved data at: ', tfrecord_path)
+    record_names = []
+    records = []
 
-    create_tf_record(images_path, tfrecord_path, images_dir_name=FLAGS.images_dir, annotation_dir_name=FLAGS.annotations_dir)
+    for i in range(shards):
+        name = "{}_{:03}.tfrecord".format(set_name, i)
+        record_path = os.path.join(FLAGS.output_dir, name)
+        record_names.append(record_path)
+
+    index = 0
+    for i in range(shards):
+        if i + 1 < shards:
+            record = images_path[index:index+num_in_shard]
+        else:
+            record = images_path[index:]
+        records.append(record)
+        index += num_in_shard
+
+    processes = []
+    for i in range(shards):
+        processes.append(Process(target=create_tf_record, args=(records[i], record_names[i],)))
+
+    for p in processes:
+        p.start()
+
+    for p in processes:
+        p.join()
 
 
 if __name__ == '__main__':

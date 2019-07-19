@@ -20,7 +20,7 @@ parser.add_argument('-i', '--image-name', default='images', type=str,
                     help='the name of image folder')
 parser.add_argument('-x', '--xml-name', default='xml', type=str,
                     help='the name of xml folder')
-parser.add_argument('-r', '--ratio', default='7', type=int,
+parser.add_argument('-r', '--ratio', default='7', type=float,
                     help='ratio for train/test, default is 70 percent train'
                     ' and 30 percent test')
 parser.add_argument('-o', '--output-dir', required=True, type=str,
@@ -59,7 +59,7 @@ def copy_files(files, dest_path):
 
 
 if __name__ == '__main__':
-    radio = int(args.ratio)
+    ratio = args.ratio
 
     input_path = args.data_dir
     image_folder_name = args.image_name
@@ -102,9 +102,11 @@ if __name__ == '__main__':
     print('images: {} <-> xmls: {}'.format(len(images), len(xmls)))
     assert len(images) == len(xmls)
 
-    assert radio <= 10
+    assert ratio <= 10
 
-    train_num = int(len(images) * (radio/10))
+    print(ratio)
+
+    train_num = int(len(images) * (ratio/10))
     print(train_num)
     print('total: {}, train num: {}, test num: {}'.format(
         len(images), train_num, len(images) - train_num))
